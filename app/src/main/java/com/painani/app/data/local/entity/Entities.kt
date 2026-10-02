@@ -8,7 +8,7 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 import androidx.room.Relation
 
-@Entity(tableName = "sessions", indices = [Index("startedAtEpochMillis")])
+@Entity(tableName = "sessions", indices = [Index("startedAtEpochMillis"), Index("sourceId")])
 data class SessionEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     /** Stored as the enum name: "RUN" | "STRENGTH". */
@@ -19,6 +19,8 @@ data class SessionEntity(
     val distanceMeters: Double?,
     @ColumnInfo(defaultValue = "NULL") val avgHeartRate: Int? = null,
     @ColumnInfo(defaultValue = "NULL") val maxHeartRate: Int? = null,
+    @ColumnInfo(defaultValue = "NULL") val sourceId: String? = null,
+    @ColumnInfo(defaultValue = "NULL") val source: String? = null,
 )
 
 @Entity(

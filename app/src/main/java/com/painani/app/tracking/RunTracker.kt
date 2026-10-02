@@ -9,10 +9,15 @@ enum class TrackerStatus { IDLE, WAITING_FOR_FIX, RUNNING, PAUSED }
 /** Live snapshot of an in-progress run, updated as GPS fixes arrive. */
 data class RunState(
     val status: TrackerStatus = TrackerStatus.IDLE,
-    /** Wall-clock start of the run, epoch millis. 0 while idle. */
+    /** Wall-clock start of the run (the first usable fix), epoch millis. 0 until then. */
     val startedAtMillis: Long = 0,
-    /** Moving time: excludes paused intervals. */
+    /** Run time: from the first fix, excluding paused intervals. Ticks while standing still. */
     val elapsedMillis: Long = 0,
+    /**
+     * Time spent actually moving: the sum of gaps between fixes that advanced the distance.
+     * Standing at a light or waiting for GPS to come back does not count.
+     */
+    val movingMillis: Long = 0,
     val distanceMeters: Double = 0.0,
     val completedSplits: List<Split> = emptyList(),
     /** Distance covered so far in the split currently in progress. */
@@ -26,8 +31,9 @@ data class RunState(
 ) {
     val isActive get() = status == TrackerStatus.RUNNING || status == TrackerStatus.PAUSED || status == TrackerStatus.WAITING_FOR_FIX
 
+    /** Average moving pace, like a watch shows it: stops are excluded so it stays comparable with [currentPaceSecPerKm]. */
     val averagePaceSecPerKm: Double?
-        get() = if (distanceMeters > 50) (elapsedMillis / 1000.0) / (distanceMeters / 1000.0) else null
+        get() = if (distanceMeters > 50 && movingMillis > 0) (movingMillis / 1000.0) / (distanceMeters / 1000.0) else null
 }
 
 /**

@@ -42,10 +42,13 @@ class LocationRunTracker(
     private var tickJob: Job? = null
 
     // Elapsed-time bookkeeping in monotonic time, immune to wall-clock changes mid-run.
-    private var segmentStartRealtime = 0L
+    // Null while the clock is not running: before the first fix, and while paused.
+    private var segmentStartRealtime: Long? = null
     private var accumulatedBeforeSegment = 0L
 
     private var lastAccepted: Location? = null
+    /** Elapsed time at the last accepted fix, so the gap to the next one can be credited as moving time. */
+    private var lastFixElapsed = 0L
     private var splitStartMillis = 0L
     private val recentFixes = ArrayDeque<Pair<Long, Double>>() // (elapsedMillis, cumulativeMeters)
 
@@ -62,8 +65,9 @@ class LocationRunTracker(
         if (_state.value.isActive) return
         if (!hasPermission) return
         reset()
-        _state.value = RunState(status = TrackerStatus.WAITING_FOR_FIX, startedAtMillis = System.currentTimeMillis())
-        segmentStartRealtime = SystemClock.elapsedRealtime()
+        // The clock starts on the first usable fix, not now: a cold GPS start can take a minute
+        // or more and that wait is not part of the run.
+        _state.value = RunState(status = TrackerStatus.WAITING_FOR_FIX)
         requestUpdates()
         startTicker()
     }
@@ -71,9 +75,10 @@ class LocationRunTracker(
     override fun pause() {
         if (_state.value.status != TrackerStatus.RUNNING && _state.value.status != TrackerStatus.WAITING_FOR_FIX) return
         accumulatedBeforeSegment = elapsedNow()
+        segmentStartRealtime = null
         locationManager.removeUpdates(listener)
         tickJob?.cancel()
-        // Forget the last fix so the jump on resume is not counted as distance.
+        // Forget the last fix so the jump on resume is not counted as distance or moving time.
         lastAccepted = null
         recentFixes.clear()
         _state.update { it.copy(status = TrackerStatus.PAUSED, elapsedMillis = accumulatedBeforeSegment, currentPaceSecPerKm = null) }
@@ -88,8 +93,7 @@ class LocationRunTracker(
     }
 
     override fun stop(): RunState {
-        val wasPaused = _state.value.status == TrackerStatus.PAUSED
-        val elapsed = if (wasPaused) accumulatedBeforeSegment else elapsedNow()
+        val elapsed = elapsedNow()
         locationManager.removeUpdates(listener)
         tickJob?.cancel()
 
@@ -116,12 +120,15 @@ class LocationRunTracker(
 
     private fun reset() {
         lastAccepted = null
+        lastFixElapsed = 0
         splitStartMillis = 0
         accumulatedBeforeSegment = 0
+        segmentStartRealtime = null
         recentFixes.clear()
     }
 
-    private fun elapsedNow(): Long = accumulatedBeforeSegment + (SystemClock.elapsedRealtime() - segmentStartRealtime)
+    private fun elapsedNow(): Long =
+        accumulatedBeforeSegment + (segmentStartRealtime?.let { SystemClock.elapsedRealtime() - it } ?: 0L)
 
     @Suppress("MissingPermission") // checked via hasPermission in start()
     private fun requestUpdates() {
@@ -155,6 +162,12 @@ class LocationRunTracker(
             return
         }
 
+        // First usable fix of the run: this is when the run (and its clock) starts.
+        if (_state.value.startedAtMillis == 0L) {
+            if (segmentStartRealtime == null) segmentStartRealtime = SystemClock.elapsedRealtime()
+            _state.update { it.copy(startedAtMillis = System.currentTimeMillis()) }
+        }
+
         val elapsed = elapsedNow()
         val point = TrackPoint(
             timeMillis = location.time,
@@ -168,7 +181,8 @@ class LocationRunTracker(
         lastAccepted = location
         if (prev == null) {
             // First fix of this segment: anchor only, no distance.
-            _state.update { it.copy(status = TrackerStatus.RUNNING, accuracyMeters = location.accuracy, trackPoints = it.trackPoints + point) }
+            lastFixElapsed = elapsed
+            _state.update { it.copy(status = TrackerStatus.RUNNING, elapsedMillis = elapsed, accuracyMeters = location.accuracy, trackPoints = it.trackPoints + point) }
             recentFixes.addLast(elapsed to _state.value.distanceMeters)
             return
         }
@@ -177,6 +191,10 @@ class LocationRunTracker(
         // GPS jitter while standing still shows up as tiny random steps; ignore movement
         // smaller than the combined accuracy would justify.
         if (step < MIN_STEP_M) step = 0.0
+        // Credit the gap since the last fix as moving time only if we actually moved, and cap it
+        // so a long GPS dropout in a tunnel is not counted as running.
+        val movingStep = if (step > 0) (elapsed - lastFixElapsed).coerceIn(0L, MAX_MOVING_GAP_MS) else 0L
+        lastFixElapsed = elapsed
 
         // All of this runs on the main looper, so read-modify-write on the flow is race-free.
         _state.value = _state.value.let { s ->
@@ -211,6 +229,7 @@ class LocationRunTracker(
             s.copy(
                 status = TrackerStatus.RUNNING,
                 elapsedMillis = elapsed,
+                movingMillis = s.movingMillis + movingStep,
                 distanceMeters = total,
                 completedSplits = splits,
                 currentSplitMeters = splitMeters,
@@ -229,5 +248,7 @@ class LocationRunTracker(
         /** Steps below this are treated as stationary noise. */
         private const val MIN_STEP_M = 1.5
         private const val PACE_WINDOW_MS = 30_000L
+        /** Longest gap between fixes still credited as moving time. */
+        private const val MAX_MOVING_GAP_MS = 10_000L
     }
 }

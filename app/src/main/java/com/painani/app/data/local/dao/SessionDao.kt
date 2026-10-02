@@ -51,6 +51,9 @@ interface SessionDao {
     @Query("DELETE FROM sessions WHERE id = :id")
     suspend fun deleteSession(id: Long)
 
+    @Query("SELECT sourceId FROM sessions WHERE sourceId IS NOT NULL")
+    suspend fun sourceIds(): List<String>
+
     @Query("UPDATE sessions SET avgHeartRate = :avg, maxHeartRate = :max WHERE id = :id")
     suspend fun updateSessionHeartRate(id: Long, avg: Int?, max: Int?)
 

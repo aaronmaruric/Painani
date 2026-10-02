@@ -17,6 +17,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,6 +40,12 @@ data class EventActions(
     val onDelete: (CalendarEvent) -> Unit,
 )
 
+/** Callbacks on a logged session. Null hides the affordances. */
+data class SessionActions(
+    /** Ask Health Connect to release the route of an imported run (system consent dialog). */
+    val onLoadRoute: (Session) -> Unit,
+)
+
 /** Everything on one day: planned events first, then what actually happened. */
 @Composable
 fun DayContent(
@@ -47,6 +54,7 @@ fun DayContent(
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(12.dp),
     eventActions: EventActions? = null,
+    sessionActions: SessionActions? = null,
 ) {
     var editing by remember { mutableStateOf<CalendarEvent?>(null) }
     editing?.let { e ->
@@ -77,7 +85,7 @@ fun DayContent(
         items(events, key = { "e${it.id}" }) { event ->
             EventCard(event, onEdit = if (eventActions != null) ({ editing = event }) else null)
         }
-        items(sessions, key = { "s${it.id}" }) { SessionCard(it) }
+        items(sessions, key = { "s${it.id}" }) { SessionCard(it, sessionActions) }
     }
 }
 
@@ -117,7 +125,7 @@ fun EventCard(event: CalendarEvent, onEdit: (() -> Unit)? = null) {
 }
 
 @Composable
-fun SessionCard(session: Session) {
+fun SessionCard(session: Session, actions: SessionActions? = null) {
     val timeFmt = DateTimeFormatter.ofPattern("HH:mm")
     OutlinedCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -131,6 +139,9 @@ fun SessionCard(session: Session) {
                     text = session.startedAt.atZone(ZoneId.systemDefault()).format(timeFmt),
                     style = MaterialTheme.typography.bodyMedium,
                 )
+            }
+            session.source?.let {
+                Text(it.uppercase(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Text(
                 text = "Duration ${formatDuration(session.durationMillis)}" +
@@ -146,6 +157,12 @@ fun SessionCard(session: Session) {
             when (session.type) {
                 SessionType.RUN -> SplitsTable(session)
                 SessionType.STRENGTH -> SetsTable(session)
+            }
+            // Other apps' routes are released one at a time after a system consent dialog.
+            if (actions != null && session.isImported && session.type == SessionType.RUN && session.trackPoints.isEmpty()) {
+                TextButton(onClick = { actions.onLoadRoute(session) }, modifier = Modifier.padding(top = 4.dp)) {
+                    Text("LOAD ROUTE FROM HEALTH CONNECT")
+                }
             }
         }
     }

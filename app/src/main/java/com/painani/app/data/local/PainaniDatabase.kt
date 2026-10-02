@@ -29,7 +29,7 @@ import com.painani.app.data.local.entity.WeightEntryEntity
         WeightEntryEntity::class,
         DailyHealthEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
     autoMigrations = [
         // v1 -> v2: adds track_points and calendar_events. Pure additions, so Room derives it.
@@ -40,6 +40,8 @@ import com.painani.app.data.local.entity.WeightEntryEntity
         AutoMigration(from = 3, to = 4),
         // v4 -> v5: adds daily_health (cached Health Connect readouts).
         AutoMigration(from = 4, to = 5),
+        // v5 -> v6: sourceId/source on sessions (workouts imported from Health Connect).
+        AutoMigration(from = 5, to = 6),
     ],
 )
 abstract class PainaniDatabase : RoomDatabase() {

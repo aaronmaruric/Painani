@@ -54,5 +54,6 @@ Multiplatform module if an iOS build is ever wanted.
 - [x] Exercise picker + rest timer on the strength screen
 - [x] Edit / delete imported calendar events
 - [x] Health Connect: heart rate on runs and splits, daily steps / resting HR / sleep, two-way weight sync, sessions written back
+- [x] Import watch workouts (Samsung Health, Garmin ...) from Health Connect, with laps as splits and routes on request
 - [ ] Per-exercise and per-distance progress charts
 - [ ] GPX/TCX export

@@ -53,6 +53,8 @@ class RoomSessionRepository(
 
     override suspend fun delete(id: Long) = dao.deleteSession(id)
 
+    override suspend fun knownSourceIds(): Set<String> = dao.sourceIds().toSet()
+
     override suspend fun updateHeartRate(id: Long, avg: Int?, max: Int?, splitAverages: List<Int?>) = db.withTransaction {
         dao.updateSessionHeartRate(id, avg, max)
         splitAverages.forEachIndexed { index, hr -> dao.updateSplitHeartRate(id, index, hr) }
@@ -84,6 +86,8 @@ class RoomSessionRepository(
         trackPoints = trackPoints.sortedBy { it.timeMillis }.map { it.toDomain() },
         avgHeartRate = session.avgHeartRate,
         maxHeartRate = session.maxHeartRate,
+        sourceId = session.sourceId,
+        source = session.source,
     )
 
     private fun Session.toEntity() = SessionEntity(
@@ -95,6 +99,8 @@ class RoomSessionRepository(
         distanceMeters = distanceMeters,
         avgHeartRate = avgHeartRate,
         maxHeartRate = maxHeartRate,
+        sourceId = sourceId,
+        source = source,
     )
 
     private fun SplitEntity.toDomain() = Split(id, index, distanceMeters, durationMillis, avgHeartRate)

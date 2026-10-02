@@ -7,7 +7,9 @@ import androidx.health.connect.client.PermissionController
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.ActiveCaloriesBurnedRecord
 import androidx.health.connect.client.records.DistanceRecord
+import androidx.health.connect.client.contracts.ExerciseRouteRequestContract
 import androidx.health.connect.client.records.ExerciseRoute
+import androidx.health.connect.client.records.ExerciseRouteResult
 import androidx.health.connect.client.records.ExerciseSessionRecord
 import androidx.health.connect.client.records.HeartRateRecord
 import androidx.health.connect.client.records.Record
@@ -15,6 +17,7 @@ import androidx.health.connect.client.records.RestingHeartRateRecord
 import androidx.health.connect.client.records.SleepSessionRecord
 import androidx.health.connect.client.records.StepsRecord
 import androidx.health.connect.client.records.WeightRecord
+import androidx.health.connect.client.records.metadata.DataOrigin
 import androidx.health.connect.client.records.metadata.Device
 import androidx.health.connect.client.records.metadata.Metadata
 import androidx.health.connect.client.request.AggregateGroupByPeriodRequest
@@ -26,6 +29,8 @@ import androidx.health.connect.client.units.Mass
 import com.painani.app.domain.model.DailyHealth
 import com.painani.app.domain.model.Session
 import com.painani.app.domain.model.SessionType
+import com.painani.app.domain.model.Split
+import com.painani.app.domain.model.TrackPoint
 import com.painani.app.domain.model.WeightEntry
 import java.time.Duration
 import java.time.Instant
@@ -39,6 +44,29 @@ data class HeartRateSample(val time: Instant, val bpm: Int)
 
 /** A weigh-in recorded by something other than us (watch, scale, Samsung Health). */
 data class ExternalWeight(val recordId: String, val time: Instant, val kg: Double, val origin: String)
+
+/**
+ * A workout recorded by another app (watch, Samsung Health, Garmin ...). Only the exercise types
+ * Painani can represent are surfaced; see [HealthConnectManager.externalSessions].
+ */
+data class ExternalSession(
+    val recordId: String,
+    val origin: String,
+    val type: SessionType,
+    /** Human label for the exercise, e.g. "Treadmill run". */
+    val activity: String,
+    val start: Instant,
+    val end: Instant,
+    val title: String?,
+    val notes: String?,
+    val distanceMeters: Double?,
+    /** Laps the source recorded, already turned into splits. Empty when it recorded none. */
+    val splits: List<Split>,
+    /** Route points when the source shared them freely; otherwise empty. */
+    val trackPoints: List<TrackPoint>,
+    /** True when a route exists but Health Connect wants the user's per-session consent to release it. */
+    val routeNeedsConsent: Boolean,
+)
 
 data class DailyReadout(
     val steps: Long?,
@@ -65,6 +93,12 @@ class HealthConnectManager(private val context: Context) {
     private val client: HealthConnectClient by lazy { HealthConnectClient.getOrCreate(context) }
 
     val permissionContract = PermissionController.createRequestPermissionResultContract()
+
+    /**
+     * Other apps' routes are released one session at a time, after the user approves a system
+     * dialog. Launch this with the session's record id; a null result means they declined.
+     */
+    val routeRequestContract = ExerciseRouteRequestContract()
 
     suspend fun hasAllPermissions(): Boolean =
         status == HealthStatus.AVAILABLE && client.permissionController.getGrantedPermissions().containsAll(PERMISSIONS)
@@ -215,6 +249,69 @@ class HealthConnectManager(private val context: Context) {
         return days.values.filter { !it.isEmpty }.sortedBy { it.date }
     }
 
+    /**
+     * Workouts other apps recorded in [from, to]. Our own writes are filtered out by data origin;
+     * so are exercise types Painani has no session type for (cycling, swimming ...). Distance is
+     * asked for per source so it is the watch's own figure, not a mix with phone steps.
+     */
+    suspend fun externalSessions(from: Instant, to: Instant): List<ExternalSession> =
+        readAll(ExerciseSessionRecord::class, from, to)
+            .filter { it.metadata.dataOrigin.packageName != context.packageName }
+            .mapNotNull { r ->
+                val type = sessionTypeOf(r.exerciseType) ?: return@mapNotNull null
+                val origin = r.metadata.dataOrigin.packageName
+                val distance = if (type == SessionType.RUN) {
+                    runCatching {
+                        client.aggregate(
+                            AggregateRequest(
+                                setOf(DistanceRecord.DISTANCE_TOTAL),
+                                TimeRangeFilter.between(r.startTime, r.endTime),
+                                setOf(DataOrigin(origin)),
+                            )
+                        )[DistanceRecord.DISTANCE_TOTAL]?.inMeters
+                    }.getOrNull()?.takeIf { it > 0 }
+                } else null
+
+                val route = (r.exerciseRouteResult as? ExerciseRouteResult.Data)?.exerciseRoute?.toTrackPoints().orEmpty()
+                ExternalSession(
+                    recordId = r.metadata.id,
+                    origin = origin,
+                    type = type,
+                    activity = activityLabel(r.exerciseType),
+                    start = r.startTime,
+                    end = r.endTime,
+                    title = r.title,
+                    notes = r.notes,
+                    distanceMeters = distance,
+                    splits = r.laps.sortedBy { it.startTime }.mapIndexedNotNull { i, lap ->
+                        val meters = lap.length?.inMeters ?: return@mapIndexedNotNull null
+                        val millis = Duration.between(lap.startTime, lap.endTime).toMillis()
+                        if (meters <= 0 || millis <= 0) null else Split(index = i, distanceMeters = meters, durationMillis = millis)
+                    },
+                    trackPoints = route,
+                    routeNeedsConsent = r.exerciseRouteResult is ExerciseRouteResult.ConsentRequired,
+                )
+            }
+            .sortedBy { it.start }
+
+    private fun sessionTypeOf(exerciseType: Int): SessionType? = when (exerciseType) {
+        ExerciseSessionRecord.EXERCISE_TYPE_RUNNING,
+        ExerciseSessionRecord.EXERCISE_TYPE_RUNNING_TREADMILL -> SessionType.RUN
+        ExerciseSessionRecord.EXERCISE_TYPE_STRENGTH_TRAINING,
+        ExerciseSessionRecord.EXERCISE_TYPE_WEIGHTLIFTING,
+        ExerciseSessionRecord.EXERCISE_TYPE_CALISTHENICS -> SessionType.STRENGTH
+        else -> null
+    }
+
+    private fun activityLabel(exerciseType: Int): String = when (exerciseType) {
+        ExerciseSessionRecord.EXERCISE_TYPE_RUNNING -> "Run"
+        ExerciseSessionRecord.EXERCISE_TYPE_RUNNING_TREADMILL -> "Treadmill run"
+        ExerciseSessionRecord.EXERCISE_TYPE_STRENGTH_TRAINING -> "Strength training"
+        ExerciseSessionRecord.EXERCISE_TYPE_WEIGHTLIFTING -> "Weightlifting"
+        ExerciseSessionRecord.EXERCISE_TYPE_CALISTHENICS -> "Calisthenics"
+        else -> "Workout"
+    }
+
     /** Weigh-ins from other apps since [since]. Our own writes are filtered out by data origin. */
     suspend fun externalWeights(since: Instant): List<ExternalWeight> =
         readAll(WeightRecord::class, since, Instant.now())
@@ -327,3 +424,15 @@ class HealthConnectManager(private val context: Context) {
         const val INSTALL_URL = "market://details?id=com.google.android.apps.healthdata&url=healthconnect%3A%2F%2Fonboarding"
     }
 }
+
+/** Health Connect route points in Painani's shape, oldest first. */
+fun ExerciseRoute.toTrackPoints(): List<TrackPoint> =
+    route.sortedBy { it.time }.map { l ->
+        TrackPoint(
+            timeMillis = l.time.toEpochMilli(),
+            latitude = l.latitude,
+            longitude = l.longitude,
+            altitudeMeters = l.altitude?.inMeters,
+            accuracyMeters = l.horizontalAccuracy?.inMeters?.toFloat(),
+        )
+    }

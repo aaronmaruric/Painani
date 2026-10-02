@@ -91,7 +91,7 @@ fun RunScreen(repository: SessionRepository, tracker: LocationRunTracker, health
     fun stopAndSave() {
         val final = tracker.stop()
         RunTrackingService.send(context, RunTrackingService.ACTION_STOP)
-        if (final.distanceMeters < 10 && final.elapsedMillis < 10_000) {
+        if (final.startedAtMillis == 0L || (final.distanceMeters < 10 && final.elapsedMillis < 10_000)) {
             scope.launch { snackbar.showSnackbar("Run discarded (too short)") }
             return
         }

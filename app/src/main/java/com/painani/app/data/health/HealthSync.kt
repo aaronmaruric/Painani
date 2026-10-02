@@ -9,12 +9,14 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import androidx.health.connect.client.records.ExerciseRoute
 import com.painani.app.domain.model.Session
 import com.painani.app.domain.model.SessionType
 import com.painani.app.domain.model.WeightEntry
 import com.painani.app.domain.repository.BodyStatsRepository
 import com.painani.app.domain.repository.HealthDataRepository
 import com.painani.app.domain.repository.SessionRepository
+import com.painani.app.domain.track.TrackMath
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
@@ -52,6 +54,7 @@ class HealthSync(
     private val syncMutex = Mutex()
 
     private val lastWeightPull = longPreferencesKey("last_weight_pull_epoch_ms")
+    private val lastSessionPull = longPreferencesKey("last_session_pull_epoch_ms")
     private val lastSync = longPreferencesKey("last_sync_epoch_ms")
     /** How many days back the daily cache has been filled, so a later history grant triggers a deeper pull. */
     private val dailyBackfillDays = intPreferencesKey("daily_backfill_days")
@@ -95,6 +98,7 @@ class HealthSync(
             if (!health.hasAllPermissions()) return@launch
             val session = sessions.session(id) ?: return@launch
             runCatching { enrichWithHeartRate(session) }.onFailure { Log.w(TAG, "HR enrich failed", it) }
+            if (session.isImported) return@launch // came from Health Connect; do not echo it back
             val refreshed = sessions.session(id) ?: session
             runCatching { health.writeSession(refreshed) }.onFailure { Log.w(TAG, "write session failed", it) }
             touch()
@@ -123,12 +127,13 @@ class HealthSync(
     }
 
     /**
-     * Full sync: daily readouts (steps, sleep, resting HR ...), weigh-ins from other apps, and
-     * heart rate back-filled onto any run that does not have it yet. Returns a short summary.
+     * Full sync: daily readouts (steps, sleep, resting HR ...), weigh-ins and workouts from other
+     * apps, and heart rate back-filled onto any run that does not have it yet. Returns a short summary.
      */
     suspend fun syncNow(): String = syncMutex.withLock {
         if (!health.hasAllPermissions()) return "Not connected"
         var pulled = 0
+        var imported = 0
         var enriched = 0
         var days = 0
 
@@ -147,6 +152,8 @@ class HealthSync(
             context.syncStore.edit { it[lastWeightPull] = Instant.now().minus(Duration.ofDays(1)).toEpochMilli() }
         }.onFailure { Log.w(TAG, "weight pull failed", it) }
 
+        runCatching { imported = importSessions() }.onFailure { Log.w(TAG, "workout import failed", it) }
+
         runCatching {
             val cutoff = LocalDate.now().minusDays(30)
             sessions.sessionsBetween(cutoff, LocalDate.now()).first()
@@ -159,6 +166,7 @@ class HealthSync(
             append("Synced")
             if (days > 0) append(" · $days day${if (days == 1) "" else "s"}")
             if (pulled > 0) append(" · $pulled weigh-in${if (pulled == 1) "" else "s"}")
+            if (imported > 0) append(" · $imported workout${if (imported == 1) "" else "s"}")
             if (enriched > 0) append(" · HR on $enriched run${if (enriched == 1) "" else "s"}")
         }
     }
@@ -177,6 +185,61 @@ class HealthSync(
         healthData.upsert(days)
         if (done < wanted) context.syncStore.edit { it[dailyBackfillDays] = wanted }
         return days.size
+    }
+
+    /**
+     * Pulls workouts other apps recorded (a watch via Samsung Health, Garmin ...) into the log.
+     * The first pull reaches back a year when Health Connect allows history reads, 30 days
+     * otherwise; later pulls overlap the last one by a day so a watch that synced late is caught.
+     * Record ids are remembered, so nothing is imported twice. Returns how many were added.
+     */
+    private suspend fun importSessions(): Int {
+        val now = Instant.now()
+        val since = context.syncStore.data.first()[lastSessionPull]?.let { Instant.ofEpochMilli(it) }
+            ?: now.minus(Duration.ofDays(if (health.hasHistoryRead()) 365 else 30))
+        val known = sessions.knownSourceIds()
+        var added = 0
+        health.externalSessions(since, now).filter { it.recordId !in known }.forEach { ext ->
+            val label = originLabel(ext.origin)
+            val session = Session(
+                type = ext.type,
+                startedAt = ext.start,
+                durationMillis = Duration.between(ext.start, ext.end).toMillis(),
+                notes = listOfNotNull(ext.title?.takeIf { it.isNotBlank() && !it.equals(ext.activity, true) }, ext.notes?.takeIf { it.isNotBlank() })
+                    .joinToString("\n"),
+                distanceMeters = ext.distanceMeters,
+                splits = ext.splits.ifEmpty { TrackMath.splits(ext.trackPoints) },
+                trackPoints = ext.trackPoints,
+                sourceId = ext.recordId,
+                source = "$label · ${ext.activity}",
+            )
+            val id = sessions.save(session)
+            runCatching { enrichWithHeartRate(session.copy(id = id)) }.onFailure { Log.w(TAG, "HR enrich failed", it) }
+            added++
+        }
+        context.syncStore.edit { it[lastSessionPull] = now.minus(Duration.ofDays(1)).toEpochMilli() }
+        return added
+    }
+
+    /**
+     * Stores a route the user released through the Health Connect consent dialog (see
+     * [HealthConnectManager.routeRequestContract]) on an imported run, deriving km splits from
+     * it when the source recorded no laps.
+     */
+    suspend fun attachRoute(sessionId: Long, route: ExerciseRoute) {
+        val session = sessions.session(sessionId) ?: return
+        val points = route.toTrackPoints()
+        if (points.size < 2) return
+        val updated = session.copy(
+            trackPoints = points,
+            splits = session.splits.ifEmpty { TrackMath.splits(points) },
+            distanceMeters = session.distanceMeters ?: TrackMath.lengthMeters(points).takeIf { it > 0 },
+        )
+        sessions.save(updated)
+        if (session.splits.isEmpty() && updated.splits.isNotEmpty()) {
+            runCatching { enrichWithHeartRate(updated) }.onFailure { Log.w(TAG, "HR enrich failed", it) }
+        }
+        touch()
     }
 
     /** Reads HR for the session window and stores the average/max plus a per-split average. */

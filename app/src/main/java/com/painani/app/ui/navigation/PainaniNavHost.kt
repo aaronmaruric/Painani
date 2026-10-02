@@ -108,6 +108,8 @@ fun PainaniNavHost(container: AppContainer) {
                     initialDate = date,
                     repository = container.sessionRepository,
                     eventRepository = container.calendarEventRepository,
+                    healthConnect = container.healthConnect,
+                    healthSync = container.healthSync,
                     onBack = { navController.popBackStack() },
                 )
             }

@@ -22,6 +22,9 @@ interface SessionRepository {
 
     suspend fun delete(id: Long)
 
+    /** External record ids of every imported session, so a sync can skip what it already has. */
+    suspend fun knownSourceIds(): Set<String>
+
     /** Updates only the heart-rate summary and per-split averages, leaving everything else untouched. */
     suspend fun updateHeartRate(id: Long, avg: Int?, max: Int?, splitAverages: List<Int?>)
 

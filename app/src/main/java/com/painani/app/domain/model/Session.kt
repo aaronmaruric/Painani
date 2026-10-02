@@ -25,7 +25,13 @@ data class Session(
     /** Heart-rate summary, filled from Health Connect when available. */
     val avgHeartRate: Int? = null,
     val maxHeartRate: Int? = null,
+    /** Id of the external record this came from (e.g. a Health Connect session), so imports do not duplicate. */
+    val sourceId: String? = null,
+    /** Where an imported session came from, for display: "Samsung Health", "Garmin" ... Null for our own. */
+    val source: String? = null,
 ) {
+    val isImported: Boolean get() = sourceId != null
+
     fun localDate(zone: ZoneId = ZoneId.systemDefault()): LocalDate =
         startedAt.atZone(zone).toLocalDate()
 }
